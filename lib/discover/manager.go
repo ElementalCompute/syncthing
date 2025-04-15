@@ -25,6 +25,7 @@ import (
 	"github.com/syncthing/syncthing/lib/stringutil"
 	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
+	"github.com/syncthing/syncthing/lib/tailnet"
 )
 
 // The Manager aggregates results from multiple Finders. Each Finder has
@@ -234,66 +235,57 @@ func (m *manager) CommitConfiguration(_, to config.Configuration) (handled bool)
 	m.mut.Lock()
 	defer m.mut.Unlock()
 	toIdentities := make(map[string]struct{})
-	if to.Options.GlobalAnnEnabled {
-		for _, srv := range to.Options.GlobalDiscoveryServers() {
-			toIdentities[globalDiscoveryIdentity(srv)] = struct{}{}
+
+	// Handle Tailscale discovery if enabled
+	if to.Options.Tailscale.Enabled {
+		for _, tag := range to.Options.Tailscale.Tags {
+			identity := fmt.Sprintf("tailscale-%s", tag)
+			toIdentities[identity] = struct{}{}
 		}
 	}
 
+	// Handle local discovery if enabled
 	if to.Options.LocalAnnEnabled {
-		toIdentities[ipv4Identity(to.Options.LocalAnnPort)] = struct{}{}
-		toIdentities[ipv6Identity(to.Options.LocalAnnMCAddr)] = struct{}{}
+		toIdentities["local"] = struct{}{}
 	}
 
-	// Remove things that we're not expected to have.
+	// Handle global discovery if enabled
+	if to.Options.GlobalAnnEnabled {
+		toIdentities["global"] = struct{}{}
+	}
+
+	// Remove things that we're not expected to have
 	for identity := range m.finders {
 		if _, ok := toIdentities[identity]; !ok {
 			m.removeLocked(identity)
 		}
 	}
 
-	// Add things we don't have.
-	if to.Options.GlobalAnnEnabled {
-		for _, srv := range to.Options.GlobalDiscoveryServers() {
-			identity := globalDiscoveryIdentity(srv)
-			// Skip, if it's already running.
-			if _, ok := m.finders[identity]; ok {
-				continue
-			}
-			gd, err := NewGlobal(srv, m.cert, m.addressLister, m.evLogger, m.registry)
-			if err != nil {
-				l.Warnln("Global discovery:", err)
-				continue
-			}
-
-			// Each global discovery server gets its results cached for five
-			// minutes, and is not asked again for a minute when it's returned
-			// unsuccessfully.
-			m.addLocked(identity, gd, 5*time.Minute, time.Minute)
-		}
-	}
-
-	if to.Options.LocalAnnEnabled {
-		// v4 broadcasts
-		v4Identity := ipv4Identity(to.Options.LocalAnnPort)
-		if _, ok := m.finders[v4Identity]; !ok {
-			bcd, err := NewLocal(m.myID, fmt.Sprintf(":%d", to.Options.LocalAnnPort), m.addressLister, m.evLogger)
-			if err != nil {
-				l.Warnln("IPv4 local discovery:", err)
-			} else {
-				m.addLocked(v4Identity, bcd, 0, 0)
+	// Add Tailscale discovery if enabled
+	if to.Options.Tailscale.Enabled {
+		// Get the global Tailscale server
+		tsServer := tailnet.GetServer()
+		if tsServer == nil {
+			l.Warnln("Tailscale discovery enabled but no Tailscale server available")
+		} else {
+			for _, tag := range to.Options.Tailscale.Tags {
+				identity := fmt.Sprintf("tailscale-%s", tag)
+				// Skip if already running
+				if _, ok := m.finders[identity]; ok {
+					continue
+				}
+				td := NewTailscale(to.Options.Tailscale.APIKey, tag, to.Options.Tailscale.Tailnet, m.addressLister, m.evLogger, m.myID, tsServer)
+				// Cache Tailscale results for 5 minutes, retry after 1 minute on failure
+				m.addLocked(identity, td, 5*time.Minute, time.Minute)
 			}
 		}
 
-		// v6 multicasts
-		v6Identity := ipv6Identity(to.Options.LocalAnnMCAddr)
-		if _, ok := m.finders[v6Identity]; !ok {
-			mcd, err := NewLocal(m.myID, to.Options.LocalAnnMCAddr, m.addressLister, m.evLogger)
-			if err != nil {
-				l.Warnln("IPv6 local discovery:", err)
-			} else {
-				m.addLocked(v6Identity, mcd, 0, 0)
-			}
+		// If auto-accept is enabled, configure device auto-acceptance
+		if to.Options.Tailscale.AutoAccept {
+			// This will be handled by the model layer
+			m.evLogger.Log(events.ConfigSaved, map[string]string{
+				"tailscaleAutoAccept": "true",
+			})
 		}
 	}
 

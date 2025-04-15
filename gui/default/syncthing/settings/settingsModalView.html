@@ -5,6 +5,7 @@
         <li class="active"><a data-toggle="tab" href="#settings-general"><span class="fas fa-cog"></span> <span translate>General</span></a></li>
         <li><a data-toggle="tab" href="#settings-gui"><span class="fas fa-desktop"></span> <span translate>GUI</span></a></li>
         <li><a data-toggle="tab" href="#settings-connections"><span class="fas fa-sitemap"></span> <span translate>Connections</span></a></li>
+        <li><a data-toggle="tab" href="#settings-tailscale"><span class="fas fa-network-wired"></span> <span translate>Tailscale</span></a></li>
         <li>
           <a data-toggle="tab" href="#settings-ignored-devices">
             <span class="fas fa-laptop"></span>
@@ -259,6 +260,92 @@
             </div>
             <div class="col-md-6">
             </div>
+          </div>
+        </div>
+
+        <div id="settings-tailscale" class="tab-pane">
+          <h4 translate>Discovery Options</h4>
+          <div class="row">
+            <div class="col-md-6">
+              <div class="form-group">
+                <div class="checkbox">
+                  <label>
+                    <input id="TailscaleDiscoveryEnabled" type="checkbox" ng-model="tmpOptions.tailscale.enabled" />
+                    <span translate>Enable Tailscale Discovery</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-group">
+                <div class="checkbox">
+                  <label>
+                    <input id="TailscaleAutoAccept" type="checkbox" ng-model="tmpOptions.tailscale.autoAccept" ng-disabled="!tmpOptions.tailscale.enabled" />
+                    <span translate>Auto-accept Devices</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="row">
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="TailscaleAPIKey">API Key</label>
+                <div class="input-group">
+                  <input id="TailscaleAPIKey" class="form-control" type="password" ng-model="tmpOptions.tailscale.apiKey" ng-disabled="!tmpOptions.tailscale.enabled" ng-trim="false" />
+                  <span class="input-group-btn">
+                    <button type="button" class="btn btn-default btn-secondary" ng-click="clearTailscaleAPIKey()" ng-disabled="!tmpOptions.tailscale.enabled">
+                      <span class="fas fa-trash"></span>
+                    </button>
+                  </span>
+                </div>
+                <p class="help-block" translate>Tailscale API key used for device discovery</p>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-group">
+                <label translate for="TailscaleOrgName">Tailnet Organization Name</label>
+                <input id="TailscaleOrgName" class="form-control" type="text" ng-model="tmpOptions.tailscale.tailnet" ng-disabled="!tmpOptions.tailscale.enabled" />
+                <p class="help-block" translate>Your Tailscale organization name</p>
+              </div>
+            </div>
+          </div>
+        
+          <div class="form-group">
+            <label translate for="TailscaleSearchTags">Search Tags</label>
+            <input id="TailscaleSearchTags" class="form-control" type="text" ng-model="tmpOptions.tailscale.tagsStr" ng-disabled="!tmpOptions.tailscale.enabled" />
+            <p class="help-block" translate>Comma-separated list of tags to search for (e.g., "syncthing,backup")</p>
+          </div>
+        
+          <h4 translate>Transport Options</h4>
+          <div class="form-group">
+            <label translate for="TailscaleAuthKey">Auth Key</label>
+            <div class="input-group">
+              <input id="TailscaleAuthKey" class="form-control" type="password" ng-model="tmpOptions.tailscale.authKey" ng-trim="false" />
+              <span class="input-group-btn">
+                <button type="button" class="btn btn-default btn-secondary" ng-click="clearTailscaleAuthKey()">
+                  <span class="fas fa-trash"></span>
+                </button>
+              </span>
+            </div>
+            <p class="help-block" translate>Tailscale authentication key for establishing connections</p>
+          </div>
+          
+          <div class="form-group">
+            <label translate for="TailscaleAdvertisedTags">Advertised Tags</label>
+            <input id="TailscaleAdvertisedTags" class="form-control" type="text" ng-model="tmpOptions.tailscale.advertiseTags" />
+            <p class="help-block" translate>Comma-separated list of tags to advertise to the Tailscale network</p>
+          </div>
+          
+          <div class="form-group">
+            <div class="checkbox">
+              <label>
+                <input id="TailscaleServerEnabled" type="checkbox" ng-model="tmpOptions.tailscale.tsServe" />
+                <span translate>Enable Tailscale Server</span>
+              </label>
+            </div>
+            <p class="help-block" translate>Make this device act as a Tailscale server for connections</p>
           </div>
         </div>
 

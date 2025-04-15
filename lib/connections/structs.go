@@ -54,6 +54,8 @@ const (
 	connTypeTCPServer
 	connTypeQUICClient
 	connTypeQUICServer
+	connTypeTailscaleClient
+	connTypeTailscaleServer
 )
 
 func (t connType) String() string {
@@ -70,6 +72,10 @@ func (t connType) String() string {
 		return "quic-client"
 	case connTypeQUICServer:
 		return "quic-server"
+	case connTypeTailscaleClient:
+		return "tailscale-client"
+	case connTypeTailscaleServer:
+		return "tailscale-server"
 	default:
 		return "unknown-type"
 	}
@@ -83,6 +89,8 @@ func (t connType) Transport() string {
 		return "tcp"
 	case connTypeQUICClient, connTypeQUICServer:
 		return "quic"
+	case connTypeTailscaleClient, connTypeTailscaleServer:
+		return "tailscale"
 	default:
 		return "unknown"
 	}

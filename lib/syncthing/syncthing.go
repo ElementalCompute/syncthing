@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/thejerf/suture/v4"
+	//"tailscale.com/tsnet"
 
 	"github.com/syncthing/syncthing/lib/api"
 	"github.com/syncthing/syncthing/lib/build"
@@ -37,6 +38,7 @@ import (
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/svcutil"
+	"github.com/syncthing/syncthing/lib/tailnet"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/upgrade"
 	"github.com/syncthing/syncthing/lib/ur"
@@ -266,15 +268,39 @@ func (a *App) startup() error {
 	tlsCfg.InsecureSkipVerify = true
 
 	// Start discovery and connection management
+// Chicken and egg, discovery manager depends on connection service to tell it what addresses it's listening on
+// Connection service depends on discovery manager to get addresses to connect to.
+// Create a wrapper that is then wired after they are both set up.
+addrLister := &lateAddressLister{}
 
-	// Chicken and egg, discovery manager depends on connection service to tell it what addresses it's listening on
-	// Connection service depends on discovery manager to get addresses to connect to.
-	// Create a wrapper that is then wired after they are both set up.
-	addrLister := &lateAddressLister{}
+// Initialize Tailscale if enabled
+if a.cfg.Options().Tailscale.Enabled {
+	// bad l.Infof("TEMP: %s", a.cfg.Options().Tailscale.AuthKey)
+	cfg := tailnet.Config{
+		Enabled:  true,
+		AuthKey:  a.cfg.Options().Tailscale.AuthKey,  // Your Tailscale auth key
+		Hostname: "syncthing-node-1",                // Name for this node in Tailscale
+		//Tailnet:  "taild67317",                         // Optional: your tailnet name should pass
+		Tags:     []string{"tag:syncthing", "env:prod"}, // Optional: tailscale tags
+	}
 
-	connRegistry := registry.New()
-	discoveryManager := discover.NewManager(a.myID, a.cfg, a.cert, a.evLogger, addrLister, connRegistry)
-	connectionsService := connections.NewService(a.cfg, a.myID, m, tlsCfg, discoveryManager, bepProtocolName, tlsDefaultCommonName, a.evLogger, connRegistry, keyGen)
+	// Initialize the Tailscale server
+	tsServer, err := tailnet.NewTsnetServer(cfg)
+	if err != nil {
+		l.Warnf("Failed to initialize Tailscale: %v", err)
+	}
+
+	// Set as the global Tailscale server for Syncthing
+	tailnet.SetServer(tsServer)
+
+	if !tailnet.IsInitialized() {
+		l.Warnln("No Tailscale server implementation provided. Tailscale features will be disabled.")
+	}
+}
+
+connRegistry := registry.New()
+discoveryManager := discover.NewManager(a.myID, a.cfg, a.cert, a.evLogger, addrLister, connRegistry)
+connectionsService := connections.NewService(a.cfg, a.myID, m, tlsCfg, discoveryManager, bepProtocolName, tlsDefaultCommonName, a.evLogger, connRegistry, keyGen)
 
 	addrLister.AddressLister = connectionsService
 

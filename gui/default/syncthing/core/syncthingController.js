@@ -1680,8 +1680,30 @@ angular.module('syncthing.core')
 
         $scope.showSettings = function () {
             // Make a working copy
+            // Initialize tailscale options if not present
+            if (!$scope.config.options.tailscale) {
+                $scope.config.options.tailscale = {
+                    enabled: false,
+                    apiKey: "",
+                    tags: [],
+                    tailnet: "",
+                    autoAccept: true,
+                    authKey: "",
+                    advertiseTags: [],
+                    tsServe: false
+                };
+            }
             $scope.tmpOptions = angular.copy($scope.config.options);
             $scope.tmpOptions.deviceName = $scope.thisDevice().name;
+
+            // Create tmpOptions.tailscale by copying from config
+            $scope.tmpOptions.tailscale = angular.copy($scope.config.options.tailscale);
+
+            // For UI convenience, convert tags array to string
+            $scope.tmpOptions.tailscale.tagsStr = $scope.tmpOptions.tailscale.tags.join(',');
+            $scope.tmpOptions.tailscale.advertiseTagsStr = $scope.tmpOptions.tailscale.advertiseTags.join(',');
+
+
             $scope.tmpOptions.upgrades = "none";
             if ($scope.tmpOptions.autoUpgradeIntervalH > 0) {
                 $scope.tmpOptions.upgrades = "stable";
@@ -1761,6 +1783,20 @@ angular.module('syncthing.core')
         $scope.saveSettings = function () {
             // Make sure something changed
             if ($scope.settingsModified()) {
+                // Process tags string back to array
+                if (typeof $scope.tmpOptions.tailscale.tagsStr === 'string') {
+                    $scope.tmpOptions.tailscale.tags = $scope.tmpOptions.tailscale.tagsStr.split(',')
+                        .map(function(t) { return t.trim(); })
+                        .filter(function(t) { return t.length > 0; });
+                }
+                if (typeof $scope.tmpOptions.tailscale.advertiseTagsStr === 'string') {
+                    $scope.tmpOptions.tailscale.advertiseTags = $scope.tmpOptions.tailscale.advertiseTagsStr.split(',')
+                        .map(function(t) { return t.trim(); })
+                        .filter(function(t) { return t.length > 0; });
+                }
+                // Remove the temporary string property before saving
+                delete $scope.tmpOptions.tailscale.advertiseTagsStr
+                delete $scope.tmpOptions.tailscale.tagsStr;
                 var themeChanged = $scope.config.gui.theme !== $scope.tmpGUI.theme;
                 // Angular has issues with selects with numeric values, so we handle strings here.
                 $scope.tmpOptions.urAccepted = parseInt($scope.tmpOptions._urAcceptedStr);
@@ -1791,6 +1827,18 @@ angular.module('syncthing.core')
                         return x.trim();
                     });
                 });
+                // Process tags as comma-separated strings to arrays if needed
+                if (typeof $scope.tmpOptions.tailscaleSearchTags === 'string') {
+                    $scope.tmpOptions.tailscaleSearchTags = $scope.tmpOptions.tailscaleSearchTags.split(',').map(function(t) {
+                        return t.trim();
+                    }).filter(Boolean);
+                }
+
+                if (typeof $scope.tmpOptions.tailscaleAdvertisedTags === 'string') {
+                    $scope.tmpOptions.tailscaleAdvertisedTags = $scope.tmpOptions.tailscaleAdvertisedTags.split(',').map(function(t) {
+                        return t.trim();
+                    }).filter(Boolean);
+                }
 
                 // Apply new settings locally
                 $scope.thisDeviceIn($scope.tmpDevices).name = $scope.tmpOptions.deviceName;
@@ -3024,6 +3072,13 @@ angular.module('syncthing.core')
             $http.get(urlbase + '/svc/random/string?length=32').success(function (data) {
                 cfg.apiKey = data.random;
             });
+        };
+        $scope.clearTailscaleAPIKey = function() {
+            $scope.tmpOptions.tailscaleAPIKey = '';
+        };
+        
+        $scope.clearTailscaleAuthKey = function() {
+            $scope.tmpOptions.tailscaleAuthKey = '';
         };
 
         $scope.acceptUR = function () {

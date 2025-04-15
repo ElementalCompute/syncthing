@@ -20,19 +20,22 @@ import (
 )
 
 type OptionsConfiguration struct {
+	// Tailscale discovery configuration
+	Tailscale TailscaleConfiguration `json:"tailscale" xml:"tailscale"`
+
 	RawListenAddresses          []string `json:"listenAddresses" xml:"listenAddress" default:"default"`
 	RawGlobalAnnServers         []string `json:"globalAnnounceServers" xml:"globalAnnounceServer" default:"default"`
-	GlobalAnnEnabled            bool     `json:"globalAnnounceEnabled" xml:"globalAnnounceEnabled" default:"true"`
-	LocalAnnEnabled             bool     `json:"localAnnounceEnabled" xml:"localAnnounceEnabled" default:"true"`
+	GlobalAnnEnabled            bool     `json:"globalAnnounceEnabled" xml:"globalAnnounceEnabled" default:"false"`
+	LocalAnnEnabled             bool     `json:"localAnnounceEnabled" xml:"localAnnounceEnabled" default:"false"`
 	LocalAnnPort                int      `json:"localAnnouncePort" xml:"localAnnouncePort" default:"21027"`
 	LocalAnnMCAddr              string   `json:"localAnnounceMCAddr" xml:"localAnnounceMCAddr" default:"[ff12::8384]:21027"`
 	MaxSendKbps                 int      `json:"maxSendKbps" xml:"maxSendKbps"`
 	MaxRecvKbps                 int      `json:"maxRecvKbps" xml:"maxRecvKbps"`
 	ReconnectIntervalS          int      `json:"reconnectionIntervalS" xml:"reconnectionIntervalS" default:"60"`
-	RelaysEnabled               bool     `json:"relaysEnabled" xml:"relaysEnabled" default:"true"`
+	RelaysEnabled               bool     `json:"relaysEnabled" xml:"relaysEnabled" default:"false"`
 	RelayReconnectIntervalM     int      `json:"relayReconnectIntervalM" xml:"relayReconnectIntervalM" default:"10"`
 	StartBrowser                bool     `json:"startBrowser" xml:"startBrowser" default:"true"`
-	NATEnabled                  bool     `json:"natEnabled" xml:"natEnabled" default:"true"`
+	NATEnabled                  bool     `json:"natEnabled" xml:"natEnabled" default:"false"`
 	NATLeaseM                   int      `json:"natLeaseMinutes" xml:"natLeaseMinutes" default:"60"`
 	NATRenewalM                 int      `json:"natRenewalMinutes" xml:"natRenewalMinutes" default:"30"`
 	NATTimeoutS                 int      `json:"natTimeoutSeconds" xml:"natTimeoutSeconds" default:"10"`
@@ -42,7 +45,7 @@ type OptionsConfiguration struct {
 	URURL                       string   `json:"urURL" xml:"urURL" default:"https://data.syncthing.net/newdata"`
 	URPostInsecurely            bool     `json:"urPostInsecurely" xml:"urPostInsecurely" default:"false"`
 	URInitialDelayS             int      `json:"urInitialDelayS" xml:"urInitialDelayS" default:"1800"`
-	AutoUpgradeIntervalH        int      `json:"autoUpgradeIntervalH" xml:"autoUpgradeIntervalH" default:"12"`
+	AutoUpgradeIntervalH        int      `json:"autoUpgradeIntervalH" xml:"autoUpgradeIntervalH" default:"0"`
 	UpgradeToPreReleases        bool     `json:"upgradeToPreReleases" xml:"upgradeToPreReleases"`
 	KeepTemporariesH            int      `json:"keepTemporariesH" xml:"keepTemporariesH" default:"24"`
 	CacheIgnoredFiles           bool     `json:"cacheIgnoredFiles" xml:"cacheIgnoredFiles" default:"false"`
@@ -59,7 +62,7 @@ type OptionsConfiguration struct {
 	SetLowPriority              bool     `json:"setLowPriority" xml:"setLowPriority" default:"true"`
 	RawMaxFolderConcurrency     int      `json:"maxFolderConcurrency" xml:"maxFolderConcurrency"`
 	CRURL                       string   `json:"crURL" xml:"crashReportingURL" default:"https://crash.syncthing.net/newcrash"`
-	CREnabled                   bool     `json:"crashReportingEnabled" xml:"crashReportingEnabled" default:"true"`
+	CREnabled                   bool     `json:"crashReportingEnabled" xml:"crashReportingEnabled" default:"false"`
 	StunKeepaliveStartS         int      `json:"stunKeepaliveStartS" xml:"stunKeepaliveStartS" default:"180"`
 	StunKeepaliveMinS           int      `json:"stunKeepaliveMinS" xml:"stunKeepaliveMinS" default:"20"`
 	RawStunServers              []string `json:"stunServers" xml:"stunServer" default:"default"`

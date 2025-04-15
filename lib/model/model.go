@@ -1,4 +1,6 @@
 // Copyright (C) 2014 The Syncthing Authors.
+// Copyright (C) 2024 Danucore AI.
+// Author: Ace Harvey
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -1845,6 +1847,12 @@ func (m *model) introduceDevice(device protocol.Device, introducerCfg config.Dev
 	newDeviceCfg.Addresses = addresses
 	newDeviceCfg.CertName = device.CertName
 	newDeviceCfg.IntroducedBy = introducerCfg.DeviceID
+
+	// Check if this is a Tailscale device that should be auto-accepted
+	if m.shouldAutoAcceptDevice(device.ID, addresses) {
+		l.Infof("Auto-accepting Tailscale device %v (%v)", device.ID, device.Name)
+		newDeviceCfg.AutoAcceptFolders = true
+	}
 
 	// The introducers' introducers are also our introducers.
 	if device.Introducer {
