@@ -55,7 +55,7 @@ func NewTsnetServer(cfg Config) (TailscaleServer, error) {
 	srv := new(tsnet.Server)
 	srv.Hostname = hostname
 	srv.AuthKey = cfg.AuthKey
-	srv.Ephemeral = true // cleanup!
+	srv.Ephemeral = false // cleanup!
 	srv.Logf = func(format string, args ...any) {
 		l.Debugf(format, args...)
 	}

@@ -101,7 +101,8 @@ func (d *TailscaleDiscovery) startAnnouncementServer() error {
 	
 	// Create listener using the tsnet server
 	var err error
-	d.tsnetListener, err = d.tsnetServer.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", d.announcePort))
+	ipv4, _ := d.tsnetServer.TailscaleIPs()
+	d.tsnetListener, err = d.tsnetServer.Listen(context.Background(), "tcp", fmt.Sprintf("%s:%d", ipv4.String(), d.announcePort))
 	if err != nil {
 		return fmt.Errorf("failed to create tsnet listener on port %d: %v", d.announcePort, err)
 	}
@@ -381,7 +382,7 @@ func (d *TailscaleDiscovery) findPeers(ctx context.Context, targetID protocol.De
 			}
 		} else {
 			d.logger.Infof("Health check disabled, adding address without verification")
-			tcpAddr := fmt.Sprintf("tcp://%s:%d", tailscaleAddr, d.healthPort)
+			tcpAddr := fmt.Sprintf("tailscale://%s:%d", tailscaleAddr, d.healthPort)
 			d.logger.Infof("Adding TCP address: %s", tcpAddr)
 			peerIPs = append(peerIPs, tcpAddr)
 			

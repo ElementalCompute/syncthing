@@ -281,7 +281,7 @@ if a.cfg.Options().Tailscale.Enabled {
 		AuthKey:  a.cfg.Options().Tailscale.AuthKey,  // Your Tailscale auth key
 		Hostname: "syncthing-node-1",                // Name for this node in Tailscale
 		//Tailnet:  "taild67317",                         // Optional: your tailnet name should pass
-		Tags:     []string{"tag:syncthing", "env:prod"}, // Optional: tailscale tags
+		Tags:     []string{"tag:syncthing"}, // Optional: tailscale tags
 	}
 
 	// Initialize the Tailscale server
