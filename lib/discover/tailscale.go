@@ -70,6 +70,19 @@ func NewTailscale(apiKey, tag, tailnet string, addrList AddressLister, evLogger 
 		d.logger.Infof("Failed to start announcement server: %v", err)
 		// Continue anyway, as we can still use the discovery functionality
 	}
+	// Start populating the cache in the background and add devices as peers
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		
+		if err := d.populateCache(ctx); err != nil {
+			d.logger.Warnf("Failed to populate cache: %v", err)
+			// Continue anyway, we'll populate the cache on-demand
+		} else {
+			// Successfully populated cache, now add devices as peers
+			d.addCachedDevicesAsPeers()
+		}
+	}()
 	
 	return d
 }
@@ -465,4 +478,325 @@ func (d *TailscaleDiscovery) Cache() map[protocol.DeviceID]CacheEntry {
 	defer d.mut.RUnlock()
 	d.logger.Infof("Cache() called, returning %d entries", len(d.cache))
 	return d.cache
+}
+
+// CachedDevices returns all device IDs currently stored in the cache
+func (d *TailscaleDiscovery) CachedDevices() []protocol.DeviceID {
+	d.mut.RLock()
+	defer d.mut.RUnlock()
+	
+	devices := make([]protocol.DeviceID, 0, len(d.cache))
+	for deviceID := range d.cache {
+		devices = append(devices, deviceID)
+	}
+	
+	d.logger.Infof("CachedDevices() called, returning %d device IDs", len(devices))
+	return devices
+}
+
+// addCachedDevicesAsPeers adds all devices in the cache as peers
+func (d *TailscaleDiscovery) addCachedDevicesAsPeers() {
+	d.logger.Infof("Adding cached Tailscale devices as peers")
+	
+	// Get all device IDs from the cache
+	devices := d.CachedDevices()
+	if len(devices) == 0 {
+		d.logger.Infof("No devices in cache to add as peers")
+		return
+	}
+	
+	d.logger.Infof("Found %d devices in cache to add as peers", len(devices))
+	
+	// For each device, get its addresses and add it as a peer
+	for _, deviceID := range devices {
+		// Skip our own device ID
+		if deviceID == d.myID {
+			d.logger.Infof("Skipping our own device ID: %s", deviceID)
+			continue
+		}
+		
+		// Get addresses for this device from the cache
+		d.mut.RLock()
+		entry, ok := d.cache[deviceID]
+		d.mut.RUnlock()
+		
+		if !ok || len(entry.Addresses) == 0 {
+			d.logger.Infof("No addresses found for device %s", deviceID)
+			continue
+		}
+		
+		d.logger.Infof("Adding device %s as peer with %d addresses", deviceID, len(entry.Addresses))
+		
+		// Emit a device discovered event
+		d.evLogger.Log(events.DeviceDiscovered, map[string]interface{}{
+			"device": deviceID.String(),
+			"addrs":  entry.Addresses,
+			"source": "tailscale",
+		})
+		
+		// For each address, try to add it to the database as a pending device
+		// This is similar to what happens in the OnHello method when a device connects
+		for _, addr := range entry.Addresses {
+			// We need to emit a special event that includes the device ID and address
+			// This will be picked up by the GUI and shown to the user
+			d.evLogger.Log(events.PendingDevicesChanged, map[string]interface{}{
+				"added": []map[string]interface{}{
+					{
+						"device":  deviceID.String(),
+						"name":    "Tailscale-" + strings.ReplaceAll(addr, ".", "-"),
+						"address": addr,
+						"type":    "tailscale",
+					},
+				},
+			})
+		}
+	}
+	
+	d.logger.Infof("Finished adding cached Tailscale devices as peers")
+}
+
+// populateCache finds all nodes in the tailnet and caches them
+func (d *TailscaleDiscovery) populateCache(ctx context.Context) error {
+	d.logger.Infof("Populating cache with all tailnet nodes")
+	
+	if d.apiKey == "" {
+		d.logger.Infof("Tailscale API key not provided")
+		return fmt.Errorf("tailscale api key not provided")
+	}
+
+	apiURL := fmt.Sprintf("https://api.tailscale.com/api/v2/tailnet/%s/devices?fields=all", d.tailnet)
+	d.logger.Infof("Making API request to: %s", apiURL)
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		d.logger.Infof("Failed to create request: %v", err)
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Add("Authorization", "Bearer "+d.apiKey)
+	d.logger.Infof("Added authorization header")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	d.logger.Infof("Sending request with timeout of 10 seconds")
+	resp, err := client.Do(req)
+	if err != nil {
+		d.logger.Infof("Request failed: %v", err)
+		return fmt.Errorf("failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	d.logger.Infof("Received response with status code: %d", resp.StatusCode)
+	
+	if resp.StatusCode != http.StatusOK {
+		d.logger.Infof("Non-OK response: %d %s", resp.StatusCode, resp.Status)
+		return fmt.Errorf("API request failed with status: %s", resp.Status)
+	}
+
+	var response struct {
+		Devices []struct {
+			Addresses []string `json:"addresses"`
+			Name      string   `json:"name"`
+			LastSeen  string   `json:"lastSeen"`
+			Tags      []string `json:"tags"`
+		} `json:"devices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		d.logger.Infof("Failed to decode response: %v", err)
+		return fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	d.logger.Infof("Successfully decoded response with %d devices", len(response.Devices))
+	
+	now := time.Now()
+	expectedTag := "tag:" + d.tag
+	
+	d.logger.Infof("Looking for devices with tag: %s", expectedTag)
+
+	// Get our own Tailscale IPs so we can use direct Tailscale connections
+	localIPv4, _ := d.tsnetServer.TailscaleIPs()
+	if localIPv4 == nil || len(localIPv4) == 0 {
+		d.logger.Infof("Warning: Could not determine local Tailscale IP address")
+	} else {
+		d.logger.Infof("Local Tailscale IP: %s", localIPv4.String())
+	}
+
+	// Lock for cache updates
+	d.mut.Lock()
+	defer d.mut.Unlock()
+
+	// Track how many devices we've added to the cache
+	devicesAdded := 0
+
+	// We'll check all devices with the right tag
+	for i, device := range response.Devices {
+		d.logger.Infof("Checking device %d: %s, tags: %v", i, device.Name, device.Tags)
+		
+		// Skip device if it doesn't have the right tag
+		hasTag := false
+		for _, tag := range device.Tags {
+			if tag == expectedTag {
+				hasTag = true
+				d.logger.Infof("Device %s has matching tag %s", device.Name, expectedTag)
+				break
+			}
+		}
+		
+		if !hasTag {
+			d.logger.Infof("Device %s doesn't have required tag, skipping", device.Name)
+			continue
+		}
+		
+		// Check if the device has been seen recently
+		lastSeen, err := time.Parse(time.RFC3339, device.LastSeen)
+		if err != nil {
+			d.logger.Infof("Failed to parse lastSeen time for device %s: %v", device.Name, err)
+			continue
+		}
+		
+		timeSinceLastSeen := now.Sub(lastSeen)
+		d.logger.Infof("Device %s was last seen %s ago", device.Name, timeSinceLastSeen)
+		
+		if timeSinceLastSeen >= 5*time.Minute {
+			d.logger.Infof("Device %s was last seen more than 5 minutes ago, skipping", device.Name)
+			continue
+		}
+		
+		// Find a suitable Tailscale address for this device
+		d.logger.Infof("Checking %d addresses for device %s", len(device.Addresses), device.Name)
+		
+		var tailscaleAddr string
+		for _, addr := range device.Addresses {
+			if strings.HasPrefix(addr, "100.") {
+				tailscaleAddr = addr
+				d.logger.Infof("Found Tailscale address for device %s: %s", device.Name, addr)
+				break
+			}
+		}
+		
+		if tailscaleAddr == "" {
+			d.logger.Infof("No suitable Tailscale address found for device %s", device.Name)
+			continue
+		}
+		
+		// Now query the device's announcement endpoint to check if it's the target device
+		announceURL := fmt.Sprintf("http://%s:%d%s", tailscaleAddr, d.announcePort, d.announcePath)
+		d.logger.Infof("Querying announcement endpoint: %s", announceURL)
+		
+		// Use the tsnet server to dial directly over Tailscale
+		announceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		conn, err := d.tsnetServer.Dial(announceCtx, "tcp", fmt.Sprintf("%s:%d", tailscaleAddr, d.announcePort))
+		cancel()
+		
+		if err != nil {
+			d.logger.Infof("Failed to dial announcement endpoint for %s: %v", device.Name, err)
+			continue
+		}
+		
+		// Create HTTP client that uses our tsnet dialed connection
+		announceReq, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d%s", tailscaleAddr, d.announcePort, d.announcePath), nil)
+		if err != nil {
+			d.logger.Infof("Failed to create announcement request: %v", err)
+			conn.Close()
+			continue
+		}
+		
+		// Use a transport that only uses our single connection
+		transport := &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return conn, nil
+			},
+		}
+		announceClient := &http.Client{Transport: transport}
+		
+		announceResp, err := announceClient.Do(announceReq)
+		if err != nil {
+			d.logger.Infof("Failed to query announcement endpoint for %s: %v", device.Name, err)
+			conn.Close()
+			continue
+		}
+		
+		if announceResp.StatusCode != http.StatusOK {
+			d.logger.Infof("Device %s returned non-OK status from announcement endpoint: %d",
+				device.Name, announceResp.StatusCode)
+			announceResp.Body.Close()
+			conn.Close()
+			continue
+		}
+		
+		var announceData struct {
+			DeviceID string `json:"device_id"`
+		}
+		
+		if err := json.NewDecoder(announceResp.Body).Decode(&announceData); err != nil {
+			d.logger.Infof("Failed to decode announcement response from %s: %v", device.Name, err)
+			announceResp.Body.Close()
+			conn.Close()
+			continue
+		}
+		
+		announceResp.Body.Close()
+		conn.Close()
+		
+		d.logger.Infof("Device %s announced ID: %s", device.Name, announceData.DeviceID)
+		
+		// Parse the announced device ID
+		deviceID, err := protocol.DeviceIDFromString(announceData.DeviceID)
+		if err != nil {
+			d.logger.Infof("Failed to parse announced device ID from %s: %v", device.Name, err)
+			continue
+		}
+		
+		// Skip our own device ID
+		if deviceID == d.myID {
+			d.logger.Infof("Skipping our own device ID: %s", deviceID)
+			continue
+		}
+		
+		d.logger.Infof("Found device %s at address %s", deviceID, tailscaleAddr)
+		
+		// Check if the device is healthy before adding its address
+		var peerIPs []string
+		if d.healthCheck {
+			d.logger.Infof("Performing health check for %s", tailscaleAddr)
+			if d.checkHealth(tailscaleAddr) {
+				d.logger.Infof("Health check passed for %s", tailscaleAddr)
+				// Add TCP address
+				tcpAddr := fmt.Sprintf("tailscale://%s:%s", tailscaleAddr, "22000")
+				d.logger.Infof("Adding TCP address: %s", tcpAddr)
+				peerIPs = append(peerIPs, tcpAddr)
+				
+				// QUIC support commented out
+				//quicAddr := fmt.Sprintf("quic://%s:%d", tailscaleAddr, d.healthPort)
+				//d.logger.Infof("Adding QUIC address: %s", quicAddr)
+				//peerIPs = append(peerIPs, quicAddr)
+			} else {
+				d.logger.Infof("Health check failed for %s, skipping", tailscaleAddr)
+				continue
+			}
+		} else {
+			d.logger.Infof("Health check disabled, adding address without verification")
+			tcpAddr := fmt.Sprintf("tailscale://%s:%s", tailscaleAddr, "22000")
+			d.logger.Infof("Adding TCP address: %s", tcpAddr)
+			peerIPs = append(peerIPs, tcpAddr)
+			
+			// QUIC support commented out
+			//quicAddr := fmt.Sprintf("quic://%s:%d", tailscaleAddr, d.healthPort)
+			//d.logger.Infof("Adding QUIC address: %s", quicAddr)
+			//peerIPs = append(peerIPs, quicAddr)
+		}
+		
+		// Cache the result
+		d.cache[deviceID] = CacheEntry{
+			Addresses: peerIPs,
+			when:      time.Now(),
+			found:     len(peerIPs) > 0,
+		}
+		
+		d.logger.Infof("Added device %s to cache with %d addresses", deviceID, len(peerIPs))
+		devicesAdded++
+	}
+
+	d.logger.Infof("Cache population complete, added %d devices to cache", devicesAdded)
+	return nil
 }
