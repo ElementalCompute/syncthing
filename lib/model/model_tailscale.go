@@ -28,9 +28,9 @@ func isTailscaleIP(addr string) bool {
 // shouldAutoAcceptDevice determines if a device should be automatically accepted
 // based on Tailscale configuration
 func (m *model) shouldAutoAcceptDevice(deviceID protocol.DeviceID, addresses []string) bool {
-	// Check if Tailscale auto-accept is enabled
+	// Check if Tailscale is enabled and auto-accept is enabled
 	opts := m.cfg.Options()
-	if !opts.Tailscale.AutoAccept {
+	if !opts.Tailscale.Enabled || !opts.Tailscale.AutoAccept {
 		return false
 	}
 

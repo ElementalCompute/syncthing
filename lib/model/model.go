@@ -2296,23 +2296,32 @@ func (m *model) setIgnores(cfg config.FolderConfiguration, content []string) err
 // and add it to a list of known devices ahead of any checks.
 func (m *model) OnHello(remoteID protocol.DeviceID, addr net.Addr, hello protocol.Hello) error {
 	if _, ok := m.cfg.Device(remoteID); !ok {
-		if err := m.db.AddOrUpdatePendingDevice(remoteID, hello.DeviceName, addr.String()); err != nil {
-			l.Warnf("Failed to persist pending device entry to database: %v", err)
+		// Try to auto-accept the device first
+		addrStr := addr.String()
+		m.handleAutoAcceptDevice(remoteID, []string{addrStr})
+		
+		// Check again if the device was added
+		if _, ok := m.cfg.Device(remoteID); !ok {
+			// If not auto-accepted, add to pending as before
+			if err := m.db.AddOrUpdatePendingDevice(remoteID, hello.DeviceName, addrStr); err != nil {
+				l.Warnf("Failed to persist pending device entry to database: %v", err)
+			}
+			m.evLogger.Log(events.PendingDevicesChanged, map[string][]interface{}{
+				"added": {map[string]string{
+					"deviceID": remoteID.String(),
+					"name":     hello.DeviceName,
+					"address":  addrStr,
+				}},
+			})
+			// DEPRECATED: Only for backwards compatibility, should be removed.
+			m.evLogger.Log(events.DeviceRejected, map[string]string{
+				"name":    hello.DeviceName,
+				"device":  remoteID.String(),
+				"address": addrStr,
+			})
+			return errDeviceUnknown
 		}
-		m.evLogger.Log(events.PendingDevicesChanged, map[string][]interface{}{
-			"added": {map[string]string{
-				"deviceID": remoteID.String(),
-				"name":     hello.DeviceName,
-				"address":  addr.String(),
-			}},
-		})
-		// DEPRECATED: Only for backwards compatibility, should be removed.
-		m.evLogger.Log(events.DeviceRejected, map[string]string{
-			"name":    hello.DeviceName,
-			"device":  remoteID.String(),
-			"address": addr.String(),
-		})
-		return errDeviceUnknown
+		// If auto-accepted, continue with the connection
 	}
 	return nil
 }
