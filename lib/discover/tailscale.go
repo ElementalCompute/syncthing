@@ -369,7 +369,7 @@ func (d *TailscaleDiscovery) findPeers(ctx context.Context, targetID protocol.De
 			if d.checkHealth(tailscaleAddr) {
 				d.logger.Infof("Health check passed for %s", tailscaleAddr)
 				// Add TCP address
-				tcpAddr := fmt.Sprintf("tcp://%s:%d", tailscaleAddr, d.healthPort)
+				tcpAddr := fmt.Sprintf("tailscale://%s:%d", tailscaleAddr, d.healthPort)
 				d.logger.Infof("Adding TCP address: %s", tcpAddr)
 				peerIPs = append(peerIPs, tcpAddr)
 				
