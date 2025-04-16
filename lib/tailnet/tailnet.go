@@ -49,6 +49,8 @@ type TailscaleServer interface {
 
 	// Close shuts down the Tailscale connection
 	Close() error
+
+	IsEnabled() bool
 }
 
 // SetServer sets the global Tailscale server instance
@@ -70,4 +72,10 @@ func IsInitialized() bool {
 	globalServerLock.RLock()
 	defer globalServerLock.RUnlock()
 	return globalServer != nil
+}
+
+func IsEnabled() bool {
+	globalServerLock.RLock()
+	defer globalServerLock.RUnlock()
+	return globalServer.IsEnabled()
 }

@@ -36,6 +36,7 @@ type TsnetServerImpl struct {
 	ipv4       net.IP
 	ipv6       net.IP
 	closed     bool
+	enabled    bool
 }
 
 // NewTsnetServer creates a new Tailscale server instance using the provided configuration
@@ -115,6 +116,8 @@ func NewTsnetServer(cfg Config) (TailscaleServer, error) {
 			l.Warnf("Failed to set Tailscale tags: %v", err)
 		}
 	}
+
+	impl.enabled = true
 
 	l.Infof("Tailscale node is ready")
 	return impl, nil
@@ -284,4 +287,10 @@ func (t *TsnetServerImpl) IsAvailable(ctx context.Context) bool {
 	}
 
 	return status.BackendState == "Running"
+}
+
+func (t *TsnetServerImpl) IsEnabled() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.enabled
 }

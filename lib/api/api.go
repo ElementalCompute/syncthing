@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	builtinsync "sync"
 	"unicode"
 
 	"github.com/calmh/incontainer"
@@ -57,6 +58,8 @@ import (
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/upgrade"
 	"github.com/syncthing/syncthing/lib/ur"
+	"github.com/syncthing/syncthing/lib/tailnet"
+	//"github.com/syncthing/syncthing/lib/config"
 )
 
 const (
@@ -139,6 +142,141 @@ func (s *service) WaitForStart() error {
 	return s.startupErr
 }
 
+func waitForCompletion(ctx context.Context, completed func() bool) bool {
+	// Check every 100ms
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			// Timeout or cancellation occurred
+			return false
+		case <-ticker.C:
+			// Check if the variable is true
+			if completed() {
+				return true
+			}
+		}
+	}
+}
+
+// MultiListener implements net.Listener and manages multiple network listeners
+type MultiListener struct {
+	listeners []net.Listener
+	acceptCh  chan acceptResult
+	closeCh   chan struct{}
+	once      builtinsync.Once
+	closeErr  error
+	closed    bool
+	mu        builtinsync.Mutex
+}
+
+type acceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+// NewMultiListener creates a new MultiListener with the provided listeners
+func NewMultiListener(listeners ...net.Listener) *MultiListener {
+	ml := &MultiListener{
+		listeners: listeners,
+		acceptCh:  make(chan acceptResult),
+		closeCh:   make(chan struct{}),
+	}
+	
+	// Start accepting connections from all listeners
+	for _, l := range listeners {
+		go ml.acceptLoop(l)
+	}
+	
+	return ml
+}
+
+// acceptLoop accepts connections from a specific listener
+func (ml *MultiListener) acceptLoop(l net.Listener) {
+	for {
+		conn, err := l.Accept()
+		
+		select {
+		case <-ml.closeCh:
+			// MultiListener is closed, so close the connection if it was accepted
+			if conn != nil {
+				conn.Close()
+			}
+			return
+		case ml.acceptCh <- acceptResult{conn, err}:
+			// Connection or error was sent to Accept()
+			if err != nil {
+				// If there was an error, this listener is done
+				return
+			}
+			// Continue accepting more connections
+		}
+	}
+}
+
+// Accept implements the Accept method in the net.Listener interface
+func (ml *MultiListener) Accept() (net.Conn, error) {
+	ml.mu.Lock()
+	if ml.closed {
+		ml.mu.Unlock()
+		return nil, errors.New("listener closed")
+	}
+	ml.mu.Unlock()
+	
+	select {
+	case <-ml.closeCh:
+		return nil, errors.New("listener closed")
+	case result := <-ml.acceptCh:
+		return result.conn, result.err
+	}
+}
+
+// Close implements the Close method in the net.Listener interface
+func (ml *MultiListener) Close() error {
+	var err error
+	
+	ml.once.Do(func() {
+		ml.mu.Lock()
+		ml.closed = true
+		ml.mu.Unlock()
+		
+		// Signal all acceptLoop goroutines to stop
+		close(ml.closeCh)
+		
+		// Close all listeners
+		for _, l := range ml.listeners {
+			if cerr := l.Close(); cerr != nil {
+				err = cerr
+			}
+		}
+		
+		ml.closeErr = err
+	})
+	
+	return ml.closeErr
+}
+
+// Addr implements the Addr method in the net.Listener interface
+// It returns the address of the first listener or a custom address
+func (ml *MultiListener) Addr() net.Addr {
+	if len(ml.listeners) > 0 {
+		return ml.listeners[0].Addr()
+	}
+	
+	// Return a custom address when there are no listeners
+	return &multiAddr{network: "multi"}
+}
+
+// Custom address type for MultiListener
+type multiAddr struct {
+	network string
+}
+
+func (a *multiAddr) Network() string { return a.network }
+func (a *multiAddr) String() string  { return "multi-listener" }
+
 func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, error) {
 	httpsCertFile := locations.Get(locations.HTTPSCertFile)
 	httpsKeyFile := locations.Get(locations.HTTPSKeyFile)
@@ -179,7 +317,61 @@ func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, err
 		// particularly care if this succeeds or not.
 		os.Remove(guiCfg.Address())
 	}
-	rawListener, err := net.Listen(guiCfg.Network(), guiCfg.Address())
+	// Check if tailnet is enabled, and if so wait for the server then return the tailscale listener 
+	var rawListener net.Listener
+	var tailscaleListener net.Listener
+	var tailErr error
+	if tailnet.IsEnabled() {
+		// Create context with timeout for waiting on Tailscale initialization
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		
+		// Wait for either Tailscale to initialize or timeout
+		result := waitForCompletion(ctx, tailnet.IsInitialized)
+		
+		if result {
+			// Tailscale initialized successfully
+			l.Infof("Tailscale GUI listener with config %s, %s", guiCfg.Network(), guiCfg.Address())
+			
+			// Create both listeners - tailscale and standard network
+			if strings.Contains(guiCfg.Address(), "127.0.0.1") { // if localhost 
+				if strings.Contains(guiCfg.Address(), ":") {
+					tailscaleListener, tailErr = tailnet.GetServer().Listen(ctx, guiCfg.Network(), fmt.Sprintf(":%s", strings.Split(guiCfg.Address(), ":")[1]))
+				} else {
+					tailscaleListener, tailErr = tailnet.GetServer().Listen(ctx, guiCfg.Network(), ":8384")
+				}
+			} else {
+				tailscaleListener, tailErr = tailnet.GetServer().Listen(ctx, guiCfg.Network(), guiCfg.Address())
+			}
+			
+			standardListener, stdErr := net.Listen(guiCfg.Network(), guiCfg.Address())
+			
+			if tailErr == nil && stdErr == nil {
+				// Both listeners created successfully, create a multi-listener
+				rawListener = NewMultiListener(tailscaleListener, standardListener)
+				l.Infoln("Created multi-listener with both Tailscale and standard network")
+			} else if tailErr == nil {
+				// Only Tailscale listener succeeded
+				rawListener = tailscaleListener
+				l.Warnln("Standard network listener failed, using Tailscale listener only:", stdErr)
+			} else if stdErr == nil {
+				// Only standard listener succeeded
+				rawListener = standardListener
+				l.Warnln("Tailscale listener failed, using standard network listener only:", tailErr)
+			} else {
+				// Both listeners failed
+				err = fmt.Errorf("failed to create listeners: tailscale error: %v, standard error: %v", tailErr, stdErr)
+			}
+		} else {
+			// Tailscale didn't initialize in time, use standard listener only
+			rawListener, err = net.Listen(guiCfg.Network(), guiCfg.Address())
+			l.Warnln("Tailscale server did not init in time for Tailscale listener")
+		}
+	} else {
+		// Tailscale not enabled, use standard listener only
+		rawListener, err = net.Listen(guiCfg.Network(), guiCfg.Address())
+	}
+	
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +408,7 @@ func sendJSON(w http.ResponseWriter, jsonObject interface{}) {
 
 func (s *service) Serve(ctx context.Context) error {
 	listener, err := s.getListener(s.cfg.GUI())
+	l.Infoln("Insecure host check: ", s.cfg.GUI().InsecureSkipHostCheck)
 	if err != nil {
 		select {
 		case <-s.startedOnce:
