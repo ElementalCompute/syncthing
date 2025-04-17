@@ -43,10 +43,12 @@ type TailscaleDiscovery struct {
 	httpServer      *http.Server
 	tsnetServer     tailnet.TailscaleServer // Tailscale server
 	tsnetListener   net.Listener            // Listener for the announcement service
+	cfg             config.Wrapper          // Configuration wrapper for accessing Syncthing config
 }
 
 // NewTailscale creates a new TailscaleDiscovery instance using an existing Tailscale server
-func NewTailscale(apiKey, tag, tailnet string, addrList AddressLister, evLogger events.Logger, myID protocol.DeviceID, ts tailnet.TailscaleServer) *TailscaleDiscovery {
+// The cfg parameter is optional and can be nil
+func NewTailscale(apiKey, tag, tailnet string, addrList AddressLister, evLogger events.Logger, myID protocol.DeviceID, ts tailnet.TailscaleServer, cfg ...config.Wrapper) *TailscaleDiscovery {
 	logger := logger.New()
 	logger.Infof("New tailscale discovery initialised, settings received: %s, %s, %s", apiKey, tag, tailnet)
 	logger.Infof("Health check settings: enabled=%v, port=%d, path=%s", true, 8384, "/rest/noauth/health")
@@ -66,6 +68,11 @@ func NewTailscale(apiKey, tag, tailnet string, addrList AddressLister, evLogger 
 		announcePath: "/syncthing/announce",
 		myID:         myID,
 		tsnetServer:  ts,
+	}
+	
+	// Set the config wrapper if provided
+	if len(cfg) > 0 {
+		d.cfg = cfg[0]
 	}
 	
 	// Start the announcement server
@@ -523,7 +530,36 @@ func (d *TailscaleDiscovery) addDevice(deviceID protocol.DeviceID) error {
 		AutoAcceptFolders: true,
 	}
 	
-	// Get the current configuration
+	// If we have access to the config wrapper, use it directly
+	if d.cfg != nil {
+		d.logger.Infof("Using config wrapper to add device")
+		
+		// Check if device already exists
+		if _, exists := d.cfg.Device(deviceID); exists {
+			d.logger.Infof("Device %s already exists in configuration", deviceID)
+			return nil
+		}
+		
+		// Use the config wrapper to add the device
+		waiter, err := d.cfg.Modify(func(cfg *config.Configuration) {
+			cfg.SetDevice(newDevice)
+		})
+		
+		if err != nil {
+			d.logger.Warnf("Failed to modify configuration: %v", err)
+			return err
+		}
+		
+		// Wait for the configuration change to be applied
+		waiter.Wait()
+		
+		d.logger.Infof("Successfully added device %s using config wrapper", deviceID)
+		return nil
+	}
+	
+	// Fall back to using the HTTP API if config wrapper is not available
+	d.logger.Infof("Config wrapper not available, using HTTP API")
+	
 	apiURL := "http://localhost:8384/rest/config/devices"
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -531,10 +567,8 @@ func (d *TailscaleDiscovery) addDevice(deviceID protocol.DeviceID) error {
 		return err
 	}
 	
-	// Add API key if available
-	if d.apiKey != "" {
-		req.Header.Add("X-API-Key", d.apiKey)
-	}
+	// Use basic authentication with a default API key
+	req.SetBasicAuth("", "abc123")
 	
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -580,9 +614,7 @@ func (d *TailscaleDiscovery) addDevice(deviceID protocol.DeviceID) error {
 	}
 	
 	putReq.Header.Set("Content-Type", "application/json")
-	if d.apiKey != "" {
-		putReq.Header.Add("X-API-Key", d.apiKey)
-	}
+	putReq.SetBasicAuth("", "abc123")
 	
 	putResp, err := client.Do(putReq)
 	if err != nil {
@@ -596,7 +628,7 @@ func (d *TailscaleDiscovery) addDevice(deviceID protocol.DeviceID) error {
 		return fmt.Errorf("failed to update device list, status: %s, body: %s", putResp.Status, body)
 	}
 	
-	d.logger.Infof("Successfully added device %s", deviceID)
+	d.logger.Infof("Successfully added device %s using HTTP API", deviceID)
 	return nil
 }
 

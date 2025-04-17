@@ -274,7 +274,7 @@ func (m *manager) CommitConfiguration(_, to config.Configuration) (handled bool)
 				if _, ok := m.finders[identity]; ok {
 					continue
 				}
-				td := NewTailscale(to.Options.Tailscale.APIKey, tag, to.Options.Tailscale.Tailnet, m.addressLister, m.evLogger, m.myID, tsServer)
+				td := NewTailscale(to.Options.Tailscale.APIKey, tag, to.Options.Tailscale.Tailnet, m.addressLister, m.evLogger, m.myID, tsServer, m.cfg)
 				// Cache Tailscale results for 5 minutes, retry after 1 minute on failure
 				m.addLocked(identity, td, 5*time.Minute, time.Minute)
 			}
