@@ -5,15 +5,18 @@
 package discover
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/logger"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -170,6 +173,9 @@ func (d *TailscaleDiscovery) Lookup(ctx context.Context, deviceID protocol.Devic
 
 	d.logger.Infof("Found %d addresses for device %s", len(addresses), deviceID)
 	
+	// Check if this is a new device being added to the cache
+	_, exists := d.cache[deviceID]
+	
 	// Cache the result
 	d.cache[deviceID] = CacheEntry{
 		Addresses: addresses,
@@ -178,6 +184,14 @@ func (d *TailscaleDiscovery) Lookup(ctx context.Context, deviceID protocol.Devic
 	}
 	
 	d.logger.Infof("Updated cache for device %s, found=%v", deviceID, len(addresses) > 0)
+	
+	// If this is a new device being added to the cache, add it as a peer
+	if !exists && len(addresses) > 0 {
+		// We need to unlock before calling addDeviceAsPeer to avoid deadlock
+		d.mut.Unlock()
+		d.addDeviceAsPeer(deviceID)
+		d.mut.Lock() // Re-lock for the deferred unlock
+	}
 
 	return addresses, nil
 }
@@ -494,6 +508,131 @@ func (d *TailscaleDiscovery) CachedDevices() []protocol.DeviceID {
 	return devices
 }
 
+// addDevice adds a new device with the given device ID to the Syncthing configuration.
+// It retrieves the current device list, adds the new device, and updates the configuration
+// using a PUT request.
+func (d *TailscaleDiscovery) addDevice(deviceID protocol.DeviceID) error {
+	d.logger.Infof("Adding new device with ID: %s", deviceID)
+	
+	// Create a new device configuration with default values
+	newDevice := config.DeviceConfiguration{
+		DeviceID:          deviceID,
+		Name:              fmt.Sprintf("tailscale-%s", deviceID.Short()),
+		Addresses:         []string{"dynamic"},
+		Compression:       config.CompressionMetadata,
+		AutoAcceptFolders: true,
+	}
+	
+	// Get the current configuration
+	apiURL := "http://localhost:8384/rest/config/devices"
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		d.logger.Warnf("Failed to create GET request: %v", err)
+		return err
+	}
+	
+	// Add API key if available
+	if d.apiKey != "" {
+		req.Header.Add("X-API-Key", d.apiKey)
+	}
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		d.logger.Warnf("Failed to get device list: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to get device list, status: %s", resp.Status)
+	}
+	
+	// Parse the device list
+	var devices []config.DeviceConfiguration
+	if err := json.NewDecoder(resp.Body).Decode(&devices); err != nil {
+		d.logger.Warnf("Failed to decode device list: %v", err)
+		return err
+	}
+	
+	// Check if device already exists
+	for _, device := range devices {
+		if device.DeviceID == deviceID {
+			d.logger.Infof("Device %s already exists in configuration", deviceID)
+			return nil
+		}
+	}
+	
+	// Add the new device to the list
+	devices = append(devices, newDevice)
+	
+	// Prepare the PUT request to update the configuration
+	deviceJSON, err := json.Marshal(devices)
+	if err != nil {
+		d.logger.Warnf("Failed to marshal device list: %v", err)
+		return err
+	}
+	
+	putReq, err := http.NewRequest("PUT", apiURL, bytes.NewBuffer(deviceJSON))
+	if err != nil {
+		d.logger.Warnf("Failed to create PUT request: %v", err)
+		return err
+	}
+	
+	putReq.Header.Set("Content-Type", "application/json")
+	if d.apiKey != "" {
+		putReq.Header.Add("X-API-Key", d.apiKey)
+	}
+	
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		d.logger.Warnf("Failed to update device list: %v", err)
+		return err
+	}
+	defer putResp.Body.Close()
+	
+	if putResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(putResp.Body)
+		return fmt.Errorf("failed to update device list, status: %s, body: %s", putResp.Status, body)
+	}
+	
+	d.logger.Infof("Successfully added device %s", deviceID)
+	return nil
+}
+
+// addDeviceAsPeer adds a single device as a peer
+func (d *TailscaleDiscovery) addDeviceAsPeer(deviceID protocol.DeviceID) {
+	// Skip our own device ID
+	if deviceID == d.myID {
+		d.logger.Infof("Skipping our own device ID: %s", deviceID)
+		return
+	}
+	
+	// Get addresses for this device from the cache
+	d.mut.RLock()
+	entry, ok := d.cache[deviceID]
+	d.mut.RUnlock()
+	
+	if !ok || len(entry.Addresses) == 0 {
+		d.logger.Infof("No addresses found for device %s", deviceID)
+		return
+	}
+	
+	d.logger.Infof("Adding device %s as peer with %d addresses", deviceID, len(entry.Addresses))
+	
+	// Add the device to the configuration
+	if err := d.addDevice(deviceID); err != nil {
+		d.logger.Warnf("Failed to add device %s to configuration: %v", deviceID, err)
+	}
+	
+	// Emit a device discovered event
+	d.evLogger.Log(events.DeviceDiscovered, map[string]interface{}{
+		"device": deviceID.String(),
+		"addrs":  entry.Addresses,
+		"source": "tailscale",
+	})
+}
+
 // addCachedDevicesAsPeers adds all devices in the cache as peers
 func (d *TailscaleDiscovery) addCachedDevicesAsPeers() {
 	d.logger.Infof("Adding cached Tailscale devices as peers")
@@ -507,49 +646,9 @@ func (d *TailscaleDiscovery) addCachedDevicesAsPeers() {
 	
 	d.logger.Infof("Found %d devices in cache to add as peers", len(devices))
 	
-	// For each device, get its addresses and add it as a peer
+	// For each device, add it as a peer
 	for _, deviceID := range devices {
-		// Skip our own device ID
-		if deviceID == d.myID {
-			d.logger.Infof("Skipping our own device ID: %s", deviceID)
-			continue
-		}
-		
-		// Get addresses for this device from the cache
-		d.mut.RLock()
-		entry, ok := d.cache[deviceID]
-		d.mut.RUnlock()
-		
-		if !ok || len(entry.Addresses) == 0 {
-			d.logger.Infof("No addresses found for device %s", deviceID)
-			continue
-		}
-		
-		d.logger.Infof("Adding device %s as peer with %d addresses", deviceID, len(entry.Addresses))
-		
-		// Emit a device discovered event
-		d.evLogger.Log(events.DeviceDiscovered, map[string]interface{}{
-			"device": deviceID.String(),
-			"addrs":  entry.Addresses,
-			"source": "tailscale",
-		})
-		
-		// For each address, try to add it to the database as a pending device
-		// This is similar to what happens in the OnHello method when a device connects
-		for _, addr := range entry.Addresses {
-			// We need to emit a special event that includes the device ID and address
-			// This will be picked up by the GUI and shown to the user
-			d.evLogger.Log(events.PendingDevicesChanged, map[string]interface{}{
-				"added": []map[string]interface{}{
-					{
-						"device":  deviceID.String(),
-						"name":    "Tailscale-" + strings.ReplaceAll(addr, ".", "-"),
-						"address": addr,
-						"type":    "tailscale",
-					},
-				},
-			})
-		}
+		d.addDeviceAsPeer(deviceID)
 	}
 	
 	d.logger.Infof("Finished adding cached Tailscale devices as peers")
@@ -786,6 +885,9 @@ func (d *TailscaleDiscovery) populateCache(ctx context.Context) error {
 			//peerIPs = append(peerIPs, quicAddr)
 		}
 		
+		// Check if this is a new device being added to the cache
+		_, exists := d.cache[deviceID]
+		
 		// Cache the result
 		d.cache[deviceID] = CacheEntry{
 			Addresses: peerIPs,
@@ -795,6 +897,14 @@ func (d *TailscaleDiscovery) populateCache(ctx context.Context) error {
 		
 		d.logger.Infof("Added device %s to cache with %d addresses", deviceID, len(peerIPs))
 		devicesAdded++
+		
+		// If this is a new device, add it as a peer
+		if !exists && len(peerIPs) > 0 {
+			// We need to unlock before calling addDeviceAsPeer to avoid deadlock
+			d.mut.Unlock()
+			d.addDeviceAsPeer(deviceID)
+			d.mut.Lock() // Re-lock for the deferred unlock
+		}
 	}
 
 	d.logger.Infof("Cache population complete, added %d devices to cache", devicesAdded)
