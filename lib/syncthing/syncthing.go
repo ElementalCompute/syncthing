@@ -306,12 +306,12 @@ if a.cfg.Options().Tailscale.Enabled {
 			a.cfg.Modify(func(cfg *config.Configuration) {
 				// Check if we're using the default listen addresses
 				usingDefault := false
-				for _, addr := range cfg.Options.RawListenAddresses {
-					if addr == "default" {
-						usingDefault = true
-						break
-					}
-				}
+				//for _, addr := range cfg.Options.RawListenAddresses {
+				//	if addr == "default" {
+				//		usingDefault = true
+				//		break
+				//	}
+				//}
 				
 				// If using default, we don't need to add the Tailscale address explicitly
 				// as it will be handled by the tailscale listener factory
