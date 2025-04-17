@@ -292,9 +292,37 @@ if a.cfg.Options().Tailscale.Enabled {
 
 	// Set as the global Tailscale server for Syncthing
 	tailnet.SetServer(tsServer)
-
+	time.Sleep(30* time.Second) // wait for tailscale to come up
 	if !tailnet.IsInitialized() {
 		l.Warnln("No Tailscale server implementation provided. Tailscale features will be disabled.")
+	} else {
+		// Get the Tailscale IPv4 address
+		ipv4, _ := tsServer.TailscaleIPs()
+		if ipv4 != nil {
+			// Add a Tailscale listen address to the configuration
+			tailscaleAddr := fmt.Sprintf("tailscale://%s:%d", ipv4.String(), 22000)
+			l.Infof("Adding Tailscale listen address: %s", tailscaleAddr)
+			
+			a.cfg.Modify(func(cfg *config.Configuration) {
+				// Check if we're using the default listen addresses
+				usingDefault := false
+				for _, addr := range cfg.Options.RawListenAddresses {
+					if addr == "default" {
+						usingDefault = true
+						break
+					}
+				}
+				
+				// If using default, we don't need to add the Tailscale address explicitly
+				// as it will be handled by the tailscale listener factory
+				if !usingDefault {
+					// Add the Tailscale address to the listen addresses
+					cfg.Options.RawListenAddresses = append(cfg.Options.RawListenAddresses, tailscaleAddr)
+				}
+			})
+		} else {
+			l.Warnln("No Tailscale IPv4 address available. Cannot add Tailscale listen address.")
+		}
 	}
 }
 
