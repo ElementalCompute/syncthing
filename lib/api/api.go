@@ -2505,101 +2505,47 @@ func (s *service) watchForNewDeviceIDs(folderID, defaultFolderPath string) {
 		knownDevices[device.DeviceID.String()] = true
 	}
 	
-	// Process a potential new device directory
-	processNewDevice := func(deviceIDStr string) {
-		// Skip if it's already a known device
-		if knownDevices[deviceIDStr] {
-			return
-		}
-		
-		// Try to parse the directory name as a device ID
-		deviceID, err := protocol.DeviceIDFromString(deviceIDStr)
-		if err != nil {
-			// Not a valid device ID, skip
-			return
-		}
-		
-		// Add the device to the folder
-		l.Infoln("watchForNewDeviceIDs: Found new device ID:", deviceIDStr)
-		if _, err := addDeviceToFolder(s.cfg, folderID, deviceID); err != nil {
-			l.Warnf("watchForNewDeviceIDs: Failed to add device %v to folder %v: %v", deviceID, folderID, err)
-		} else {
-			// Save the configuration
-			if err := s.cfg.Save(); err != nil {
-				l.Warnln("watchForNewDeviceIDs: Failed to save configuration:", err)
-			}
-			// Add to known devices
-			knownDevices[deviceIDStr] = true
-		}
-	}
-	
 	// Initial scan to find existing device IDs
-	entries, err := os.ReadDir(folderPath)
-	if err != nil {
-		l.Warnln("watchForNewDeviceIDs: Error reading directory:", err)
-		return
-	}
-	
-	for _, entry := range entries {
-		if entry.IsDir() {
-			processNewDevice(entry.Name())
+	initialScan := func() {
+		entries, err := os.ReadDir(folderPath)
+		if err != nil {
+			l.Warnln("watchForNewDeviceIDs: Error reading directory:", err)
+			return
 		}
-	}
-	
-	// Create a filesystem for watching
-	filesystem := fs.NewFilesystem(fs.FilesystemTypeBasic, folderPath)
-	
-	// Create a context for the watcher
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	
-	// Set up a file system watcher using Syncthing's fs package
-	eventChan, errChan, err := filesystem.Watch(".", nil, ctx, true)
-	if err != nil {
-		l.Warnln("watchForNewDeviceIDs: Failed to create watcher:", err)
-		// Fall back to polling if watch fails
-		go s.pollForNewDeviceIDs(folderID, defaultFolderPath, knownDevices)
-		return
-	}
-	
-	// Watch for changes
-	for {
-		select {
-		case event, ok := <-eventChan:
-			if !ok {
-				l.Warnln("watchForNewDeviceIDs: Watcher channel closed, stopping watcher")
-				return
-			}
-			
-			// Only process directory creation events (all events are NonRemove or Remove)
-			if event.Type == fs.NonRemove {
-				// Check if it's a directory
-				info, err := filesystem.Lstat(event.Name)
-				if err != nil {
-					l.Debugln("watchForNewDeviceIDs: Error getting file info:", err)
+		
+		for _, entry := range entries {
+			if entry.IsDir() {
+				deviceIDStr := entry.Name()
+				// Skip if it's already a known device
+				if knownDevices[deviceIDStr] {
 					continue
 				}
 				
-				if info.IsDir() {
-					deviceIDStr := filepath.Base(event.Name)
-					processNewDevice(deviceIDStr)
+				// Try to parse the directory name as a device ID
+				deviceID, err := protocol.DeviceIDFromString(deviceIDStr)
+				if err != nil {
+					// Not a valid device ID, skip
+					continue
+				}
+				
+				// Add the device to the folder
+				l.Infoln("watchForNewDeviceIDs: Found new device ID:", deviceIDStr)
+				if _, err := addDeviceToFolder(s.cfg, folderID, deviceID); err != nil {
+					l.Warnf("watchForNewDeviceIDs: Failed to add device %v to folder %v: %v", deviceID, folderID, err)
+				} else {
+					// Save the configuration
+					if err := s.cfg.Save(); err != nil {
+						l.Warnln("watchForNewDeviceIDs: Failed to save configuration:", err)
+					}
+					// Add to known devices
+					knownDevices[deviceIDStr] = true
 				}
 			}
-			
-		case err, ok := <-errChan:
-			if !ok {
-				l.Warnln("watchForNewDeviceIDs: Watcher error channel closed, stopping watcher")
-				return
-			}
-			l.Warnln("watchForNewDeviceIDs: Watcher error:", err)
 		}
 	}
-}
-
-// pollForNewDeviceIDs is a fallback method that polls for new device IDs if watch fails
-func (s *service) pollForNewDeviceIDs(folderID, defaultFolderPath string, knownDevices map[string]bool) {
-	folderPath := filepath.Join(defaultFolderPath, folderID)
-	l.Infoln("pollForNewDeviceIDs: Starting polling for folder:", folderID, "at path:", folderPath)
+	
+	// Perform initial scan
+	initialScan()
 	
 	// Set up polling interval - checking every 30 seconds is a reasonable balance
 	ticker := time.NewTicker(30 * time.Second)
@@ -2609,41 +2555,7 @@ func (s *service) pollForNewDeviceIDs(folderID, defaultFolderPath string, knownD
 	for {
 		select {
 		case <-ticker.C:
-			entries, err := os.ReadDir(folderPath)
-			if err != nil {
-				l.Warnln("pollForNewDeviceIDs: Error reading directory:", err)
-				continue
-			}
-			
-			for _, entry := range entries {
-				if entry.IsDir() {
-					// Skip if it's already a known device
-					deviceIDStr := entry.Name()
-					if knownDevices[deviceIDStr] {
-						continue
-					}
-					
-					// Try to parse the directory name as a device ID
-					deviceID, err := protocol.DeviceIDFromString(deviceIDStr)
-					if err != nil {
-						// Not a valid device ID, skip
-						continue
-					}
-					
-					// Add the device to the folder
-					l.Infoln("pollForNewDeviceIDs: Found new device ID:", deviceIDStr)
-					if _, err := addDeviceToFolder(s.cfg, folderID, deviceID); err != nil {
-						l.Warnf("pollForNewDeviceIDs: Failed to add device %v to folder %v: %v", deviceID, folderID, err)
-					} else {
-						// Save the configuration
-						if err := s.cfg.Save(); err != nil {
-							l.Warnln("pollForNewDeviceIDs: Failed to save configuration:", err)
-						}
-						// Add to known devices
-						knownDevices[deviceIDStr] = true
-					}
-				}
-			}
+			initialScan() // Reuse the same scan function
 		}
 	}
 }

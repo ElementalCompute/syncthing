@@ -1399,6 +1399,36 @@ func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.Devi
 				continue
 			}
 			delete(expiredPending, folder.ID)
+			
+			// Check if the folder already exists locally but isn't shared with this device
+			existingCfg, existsLocally := m.cfg.Folder(folder.ID)
+			
+			// Automatically accept the folder
+			defaultFolderCfg := m.cfg.DefaultFolder()
+			fcfg, accepted := m.handleAutoAccepts(deviceID, folder, ccDeviceInfos[folder.ID], existingCfg, existsLocally, defaultFolderCfg)
+			if accepted {
+				m.cfg.Modify(func(cfg *config.Configuration) {
+					if existsLocally {
+						// Update existing folder configuration
+						for i := range cfg.Folders {
+							if cfg.Folders[i].ID == folder.ID {
+								cfg.Folders[i] = fcfg
+								break
+							}
+						}
+					} else {
+						// Add new folder configuration
+						cfg.Folders = append(cfg.Folders, fcfg)
+					}
+				})
+				l.Infof("Auto-accepted folder %s from device %q", folder.Description(), deviceID)
+				if !folder.Paused {
+					indexHandlers.AddIndexInfo(folder.ID, ccDeviceInfos[folder.ID])
+				}
+				continue
+			}
+			
+			// If auto-accept failed, add to pending as before
 			of.Label = folder.Label
 			of.ReceiveEncrypted = len(ccDeviceInfos[folder.ID].local.EncryptionPasswordToken) > 0
 			of.RemoteEncrypted = len(ccDeviceInfos[folder.ID].remote.EncryptionPasswordToken) > 0
