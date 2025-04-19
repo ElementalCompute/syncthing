@@ -292,7 +292,9 @@ if a.cfg.Options().Tailscale.Enabled {
 
 	// Set as the global Tailscale server for Syncthing
 	tailnet.SetServer(tsServer)
-	time.Sleep(30* time.Second) // wait for tailscale to come up
+
+	time.Sleep(10* time.Second) // wait for tailscale to come up - better ways to do this ASDG
+
 	if !tailnet.IsInitialized() {
 		l.Warnln("No Tailscale server implementation provided. Tailscale features will be disabled.")
 	} else {

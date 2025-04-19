@@ -169,6 +169,12 @@ type serveOptions struct {
 	TailscaleEnabled bool   `name:"tailscale-enabled" help:"Enable Tailscale server"`
 	TailscaleAuthKey string `name:"tailscale-authkey" placeholder:"KEY" help:"Tailscale auth key for connecting to the Tailscale network"`
 	TailscaleHostname string `name:"tailscale-hostname" placeholder:"NAME" help:"Hostname to use for the Tailscale node" default:"syncthing"`
+	
+	// Tailscale discovery options
+	TailscaleDiscoveryEnabled bool   `name:"tailscale-discovery-enabled" help:"Enable Tailscale discovery mechanism"`
+	TailscaleDiscoveryTags string    `name:"tailscale-discovery-tags" placeholder:"TAGS" help:"Comma-separated list of Tailscale tags to search for (e.g., 'syncthing,backup')" default:"syncthing"`
+	TailscaleDiscoveryAPIKey string  `name:"tailscale-discovery-apikey" placeholder:"KEY" help:"Tailscale API key for discovery (if different from connection auth key)"`
+	TailscaleOrganization string     `name:"tailscale-organization" placeholder:"ORG" help:"Tailscale organization/tailnet name (e.g., 'example.com')"`
 
 	// Debug options below
 	DebugDBIndirectGCInterval time.Duration `env:"STGCINDIRECTEVERY" help:"Database indirection GC interval"`
@@ -615,12 +621,44 @@ func syncthingMain(options serveOptions) {
 	earlyService.Add(cfgWrapper)
 
 	// Update Tailscale configuration from command line flags
-	if options.TailscaleEnabled {
+	if options.TailscaleEnabled || options.TailscaleDiscoveryEnabled {
 		_, err := cfgWrapper.Modify(func(cfg *config.Configuration) {
-			cfg.Options.Tailscale.Enabled = true
-			cfg.Options.Tailscale.ServerEnabled = true
-			if options.TailscaleAuthKey != "" {
-				cfg.Options.Tailscale.AuthKey = options.TailscaleAuthKey
+			// Server configuration
+			if options.TailscaleEnabled {
+				cfg.Options.Tailscale.Enabled = true
+				cfg.Options.Tailscale.ServerEnabled = true
+				if options.TailscaleAuthKey != "" {
+					cfg.Options.Tailscale.AuthKey = options.TailscaleAuthKey
+				}
+			}
+			
+			// Discovery configuration
+			if options.TailscaleDiscoveryEnabled {
+				cfg.Options.Tailscale.Enabled = true // Discovery requires Tailscale to be enabled
+				
+				// Set API key for discovery (use discovery-specific key if provided, otherwise use the main auth key)
+				if options.TailscaleDiscoveryAPIKey != "" {
+					cfg.Options.Tailscale.APIKey = options.TailscaleDiscoveryAPIKey
+				} else if options.TailscaleAuthKey != "" && cfg.Options.Tailscale.APIKey == "" {
+					// Only use auth key as fallback if no API key is already set
+					cfg.Options.Tailscale.APIKey = options.TailscaleAuthKey
+				}
+				
+				// Set tailnet/organization name
+				if options.TailscaleOrganization != "" {
+					cfg.Options.Tailscale.Tailnet = options.TailscaleOrganization
+				}
+				
+				// Set discovery tags (comma-separated list)
+				if options.TailscaleDiscoveryTags != "" {
+					// Split the comma-separated list into individual tags
+					tags := strings.Split(options.TailscaleDiscoveryTags, ",")
+					// Trim whitespace from each tag
+					for i, tag := range tags {
+						tags[i] = strings.TrimSpace(tag)
+					}
+					cfg.Options.Tailscale.Tags = tags
+				}
 			}
 		})
 		if err != nil {

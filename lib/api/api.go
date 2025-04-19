@@ -493,6 +493,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/pause", s.makeDevicePauseHandler(true))   // [device]
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/resume", s.makeDevicePauseHandler(false)) // [device]
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/debug", s.postSystemDebug)                // [enable] [disable]
+	restMux.HandlerFunc(http.MethodPost, "/rest/noauth/sync", s.postSync)                        // path
 
 	// The DELETE handlers
 	restMux.HandlerFunc(http.MethodDelete, "/rest/cluster/pending/devices", s.deletePendingDevices) // device
@@ -2277,6 +2278,161 @@ func httpError(w http.ResponseWriter, err error) {
 	} else {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+// for postSync
+func addDeviceToFolder(wrapper config.Wrapper, folderID string, deviceID protocol.DeviceID) (config.Waiter, error) {
+    return wrapper.Modify(func(cfg *config.Configuration) {
+        // Find the folder in the configuration
+        folder,_, ok := cfg.Folder(folderID)
+        if !ok {
+            // Folder doesn't exist, handle this case
+            return
+        }
+        
+        // Check if the device is already in the folder
+        for _, device := range folder.Devices {
+            if device.DeviceID == deviceID {
+                // Device already exists in this folder
+                return
+            }
+        }
+        
+        // Add the device to the folder
+        folder.Devices = append(folder.Devices, config.FolderDeviceConfiguration{
+            DeviceID: deviceID,
+            // Set other properties as needed, like encryption password
+        })
+        
+        // Update the folder in the configuration
+        cfg.SetFolder(folder)
+    })
+}
+func exists(path string) (bool, error) {
+    _, err := os.Stat(path)
+    if err == nil {
+        return true, nil
+    }
+    if errors.Is(err, fs.ErrNotExist) {
+        return false, nil
+    }
+    return false, err
+}
+
+// postSync adds a folder at the specified path
+// This is an unauthenticated endpoint that only accepts requests from localhost
+func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
+	// Check if request is from localhost - security measure
+	if !addressIsLocalhost(r.RemoteAddr) {
+		http.Error(w, "Access denied: This endpoint is only available from localhost", http.StatusForbidden)
+		return
+	}
+
+	// Get path from query parameter
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Extract the innermost folder name to use as ID
+	folderName := filepath.Base(path)
+	if folderName == "" || folderName == "." || folderName == "/" {
+		http.Error(w, "invalid path: cannot extract folder name", http.StatusBadRequest)
+		return
+	}
+
+	// Create a new folder configuration
+	folder := s.cfg.DefaultFolder().Copy()
+	folder.ID = folderName
+	folder.Label = folderName
+	folder.Path = path
+
+	//First, we get the path of the Default folder.
+	defaultFolderPath := s.cfg.DefaultFolder().Copy().Path
+
+	// Then we set up the folder
+	// Add the folder to the configuration
+	waiter, err := s.cfg.Modify(func(cfg *config.Configuration) {
+		cfg.SetFolder(folder)
+	})
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	waiter.Wait()
+	if err := s.cfg.Save(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Before this method exists, we check if the subdir for the id exists
+	subpath := filepath.Join(defaultFolderPath, folderName)
+	exist, err := exists(subpath)
+	if err != nil {
+		// Handle error from checking if path exists
+		http.Error(w, fmt.Sprintf("Error checking subdirectory: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Create a device ID file to mark this folder as shared
+	deviceIDFile := filepath.Join(path, ".stfolder", s.id.String())
+
+	if exist {
+		// Subdirectory exists in the default folder
+		// We add the file to the subpath called our deviceID
+		if err := os.MkdirAll(filepath.Join(path, ".stfolder"), 0755); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create marker directory: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		if err := os.WriteFile(deviceIDFile, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to write device ID file: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Then we call addDeviceToFolder on each device to the newly created folder
+		for _, device := range s.cfg.DeviceList() {
+			// Skip ourselves
+			if device.DeviceID == s.id {
+				continue
+			}
+			
+			// Add each device to the folder
+			if _, err := addDeviceToFolder(s.cfg, folderName, device.DeviceID); err != nil {
+				l.Warnf("Failed to add device %v to folder %v: %v", device.DeviceID, folderName, err)
+				// Continue with other devices even if one fails
+			}
+		}
+	} else {
+		// We create the folder, and add a file at subpath called our deviceID
+		if err := os.MkdirAll(path, 0755); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create folder: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		if err := os.MkdirAll(filepath.Join(path, ".stfolder"), 0755); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create marker directory: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		if err := os.WriteFile(deviceIDFile, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to write device ID file: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Save the configuration again after all modifications
+	if err := s.cfg.Save(); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save configuration: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]string{
+		"id":   folder.ID,
+		"path": folder.Path,
+	})
 }
 
 type bufferedResponseWriter struct {
