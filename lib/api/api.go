@@ -2321,8 +2321,11 @@ func exists(path string) (bool, error) {
 // postSync adds a folder at the specified path
 // This is an unauthenticated endpoint that only accepts requests from localhost
 func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
+	l.Infoln("postSync: Received request to add a new folder")
+	
 	// Check if request is from localhost - security measure
 	if !addressIsLocalhost(r.RemoteAddr) {
+		l.Warnln("postSync: Access denied - request not from localhost:", r.RemoteAddr)
 		http.Error(w, "Access denied: This endpoint is only available from localhost", http.StatusForbidden)
 		return
 	}
@@ -2330,105 +2333,142 @@ func (s *service) postSync(w http.ResponseWriter, r *http.Request) {
 	// Get path from query parameter
 	path := r.URL.Query().Get("path")
 	if path == "" {
+		l.Warnln("postSync: Missing path parameter")
 		http.Error(w, "path parameter is required", http.StatusBadRequest)
 		return
 	}
+	l.Infoln("postSync: Processing path:", path)
 
 	// Extract the innermost folder name to use as ID
 	folderName := filepath.Base(path)
 	if folderName == "" || folderName == "." || folderName == "/" {
+		l.Warnln("postSync: Invalid path, cannot extract folder name:", path)
 		http.Error(w, "invalid path: cannot extract folder name", http.StatusBadRequest)
 		return
 	}
+	l.Infoln("postSync: Using folder name:", folderName)
 
 	// Create a new folder configuration
+	l.Infoln("postSync: Creating folder configuration")
 	folder := s.cfg.DefaultFolder().Copy()
 	folder.ID = folderName
 	folder.Label = folderName
 	folder.Path = path
 
 	//First, we get the path of the Default folder.
-	defaultFolderPath := s.cfg.DefaultFolder().Copy().Path
+	defaultFolder, _ := s.cfg.Folder("default")
+	defaultFolderPath := defaultFolder.Copy().Path
+	l.Infoln("postSync: Default folder path:", defaultFolderPath)
 
 	// Then we set up the folder
 	// Add the folder to the configuration
+	l.Infoln("postSync: Adding folder to configuration:", folderName)
 	waiter, err := s.cfg.Modify(func(cfg *config.Configuration) {
 		cfg.SetFolder(folder)
 	})
 
 	if err != nil {
+		l.Warnln("postSync: Failed to modify configuration:", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	waiter.Wait()
 	if err := s.cfg.Save(); err != nil {
+		l.Warnln("postSync: Failed to save configuration:", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	l.Infoln("postSync: Folder added to configuration successfully")
 
 	// Before this method exists, we check if the subdir for the id exists
 	subpath := filepath.Join(defaultFolderPath, folderName)
+	l.Debugln("postSync: Checking if subdirectory exists:", subpath)
 	exist, err := exists(subpath)
 	if err != nil {
 		// Handle error from checking if path exists
+		l.Warnln("postSync: Error checking subdirectory:", err)
 		http.Error(w, fmt.Sprintf("Error checking subdirectory: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Create a device ID file to mark this folder as shared
-	deviceIDFile := filepath.Join(path, ".stfolder", s.id.String())
+	// Create a device ID directory in the default folder structure
+	deviceIDPath := filepath.Join(defaultFolderPath, folderName, s.id.String())
+	l.Infoln("postSync: Device ID path:", deviceIDPath)
 
 	if exist {
+		l.Infoln("postSync: Subdirectory exists, setting up for sharing")
 		// Subdirectory exists in the default folder
-		// We add the file to the subpath called our deviceID
-		if err := os.MkdirAll(filepath.Join(path, ".stfolder"), 0755); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to create marker directory: %v", err), http.StatusInternalServerError)
+		// We add the directory with our device ID in the default folder structure
+		l.Infoln("postSync: Creating device ID directory in default folder structure")
+		if err := os.MkdirAll(deviceIDPath, 0755); err != nil {
+			l.Warnln("postSync: Failed to create device ID directory:", err)
+			http.Error(w, fmt.Sprintf("Failed to create device ID directory: %v", err), http.StatusInternalServerError)
 			return
 		}
 		
-		if err := os.WriteFile(deviceIDFile, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to write device ID file: %v", err), http.StatusInternalServerError)
+		// Also create the .stfolder marker in the actual folder path
+		l.Infoln("postSync: Creating .stfolder marker in the folder path")
+		if err := os.MkdirAll(filepath.Join(path, ".stfolder"), 0755); err != nil {
+			l.Warnln("postSync: Failed to create .stfolder marker:", err)
+			http.Error(w, fmt.Sprintf("Failed to create .stfolder marker: %v", err), http.StatusInternalServerError)
 			return
 		}
 		
 		// Then we call addDeviceToFolder on each device to the newly created folder
+		l.Infoln("postSync: Adding devices to the folder")
+		deviceCount := 0
 		for _, device := range s.cfg.DeviceList() {
 			// Skip ourselves
 			if device.DeviceID == s.id {
+				l.Debugln("postSync: Skipping our own device ID")
 				continue
 			}
 			
 			// Add each device to the folder
+			l.Debugln("postSync: Adding device to folder:", device.DeviceID)
 			if _, err := addDeviceToFolder(s.cfg, folderName, device.DeviceID); err != nil {
-				l.Warnf("Failed to add device %v to folder %v: %v", device.DeviceID, folderName, err)
+				l.Warnf("postSync: Failed to add device %v to folder %v: %v", device.DeviceID, folderName, err)
 				// Continue with other devices even if one fails
+			} else {
+				deviceCount++
 			}
 		}
+		l.Infoln("postSync: Added", deviceCount, "devices to folder", folderName)
 	} else {
-		// We create the folder, and add a file at subpath called our deviceID
+		l.Infoln("postSync: Subdirectory doesn't exist, creating new folder structure")
+		// We create the folder, and add a directory with our device ID in the default folder structure
+		l.Infoln("postSync: Creating folder directory")
 		if err := os.MkdirAll(path, 0755); err != nil {
+			l.Warnln("postSync: Failed to create folder:", err)
 			http.Error(w, fmt.Sprintf("Failed to create folder: %v", err), http.StatusInternalServerError)
 			return
 		}
 		
+		l.Infoln("postSync: Creating .stfolder directory")
 		if err := os.MkdirAll(filepath.Join(path, ".stfolder"), 0755); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to create marker directory: %v", err), http.StatusInternalServerError)
+			l.Warnln("postSync: Failed to create .stfolder marker:", err)
+			http.Error(w, fmt.Sprintf("Failed to create .stfolder marker: %v", err), http.StatusInternalServerError)
 			return
 		}
 		
-		if err := os.WriteFile(deviceIDFile, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to write device ID file: %v", err), http.StatusInternalServerError)
+		l.Infoln("postSync: Creating device ID directory in default folder structure")
+		if err := os.MkdirAll(deviceIDPath, 0755); err != nil {
+			l.Warnln("postSync: Failed to create device ID directory:", err)
+			http.Error(w, fmt.Sprintf("Failed to create device ID directory: %v", err), http.StatusInternalServerError)
 			return
 		}
 	}
 
 	// Save the configuration again after all modifications
+	l.Debugln("postSync: Saving configuration after all modifications")
 	if err := s.cfg.Save(); err != nil {
+		l.Warnln("postSync: Failed to save final configuration:", err)
 		http.Error(w, fmt.Sprintf("Failed to save configuration: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	l.Infoln("postSync: Successfully added folder:", folderName, "at path:", path)
 	sendJSON(w, map[string]string{
 		"id":   folder.ID,
 		"path": folder.Path,
